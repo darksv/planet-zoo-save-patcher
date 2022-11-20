@@ -1,4 +1,13 @@
+#![feature(option_result_contains)]
+
+use std::default::Default;
+use std::fs::read;
+use std::path::PathBuf;
+
+use argh::FromArgs;
 use inflate::inflate_bytes;
+use ron::ser::PrettyConfig;
+use serde::{Deserialize, Serialize};
 
 use crate::crc32::game_crc;
 
@@ -67,7 +76,7 @@ impl<'d> Reader<'d> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum Data<'d> {
     Table(Vec<(Data<'d>, Data<'d>)>),
     Uint64(u64),
@@ -197,8 +206,7 @@ fn modify(file: &mut File) {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let data = std::fs::read(r"C:\Users\Host\Downloads\zplayer")?;
+fn read_file(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut reader = Reader::new(&data);
     let Ok(b"PK\x03\x04") = reader.read_n() else {
         anyhow::bail!("uwu");
@@ -221,17 +229,43 @@ fn main() -> anyhow::Result<()> {
     let data = reader.read_slice(compressed as _)?;
     dbg!(flags, compression, modtime, moddate, crc32, compressed, uncompressed, name_len, extra_len, std::str::from_utf8(name), extra);
 
+    println!("{:02x?}", reader.remainder());
+    for _ in 0..2 {
+        reader.read_u32()?;
+        let v = reader.read_u16()?;
+        let vn = reader.read_u16()?;
+        let fl = reader.read_u16()?;
+        dbg!(v, vn, fl);
+
+        let compression = reader.read_u16()?;
+        let modtime = reader.read_u16()?;
+        let moddate = reader.read_u16()?;
+
+        println!("{:04x?}", compression);
+        println!("{:04x?}", modtime);
+        println!("{:04x?}", moddate);
+
+        let crc = reader.read_n::<4>()?;
+        let cs = reader.read_u32()?;
+        let us = reader.read_u32()?;
+
+println!("{:02x?}", crc);
+    }
+
     let data_in = inflate_bytes(data).map_err(anyhow::Error::msg)?;
     assert_eq!(data_in.len(), uncompressed as _);
 
-    let mut file = deserialize(&data_in)?;
-    modify(&mut file);
+    Ok(data_in)
+}
+
+fn save_file(file: &File) -> anyhow::Result<()> {
     let mut content = Vec::new();
     serialize(&file, &mut content);
+
+    std::fs::write("araaa.ron", ron::ser::to_string_pretty(&file.data, PrettyConfig::default())?)?;
     std::fs::write("content", &content)?;
 
     // assert_eq!(&content, &data_in);
-
 
     let packed = deflate::deflate_bytes(&content);
     dbg!(packed.len());
@@ -239,12 +273,48 @@ fn main() -> anyhow::Result<()> {
     let mut out = Vec::new();
     out.extend_from_slice(HEAD);
     out.extend_from_slice(&packed);
+    let tail_start = out.len();
     out.extend_from_slice(TAIL);
-    out[0x0E..][..4].copy_from_slice(&u32::to_le_bytes(crc32fast::hash(&content)));
+
+    let crcx= crc32fast::hash(&content);
+    out[0x0E..][..4].copy_from_slice(&u32::to_le_bytes(crcx));
     out[0x12..][..4].copy_from_slice(&u32::to_le_bytes(packed.len() as _));
     out[0x16..][..4].copy_from_slice(&u32::to_le_bytes(content.len() as _));
-
+    out[tail_start+0x10 ..][..4].copy_from_slice(&u32::to_le_bytes(crcx));
+    out[tail_start+0x14 ..][..4].copy_from_slice(&u32::to_le_bytes(packed.len() as _));
+    out[tail_start+0x18 ..][..4].copy_from_slice(&u32::to_le_bytes(content.len() as _));
+    out[tail_start+0x46 ..][..4].copy_from_slice(&u32::to_le_bytes(tail_start as _));
     std::fs::write("patched", out)?;
+
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    // if std::env::args_os().len() != 2 {
+    //     anyhow::bail!("where plik?");
+    // };
+    //
+    // let file: PathBuf = std::env::args_os().nth(1).unwrap().into();
+    // let content = std::fs::read(file)?;
+    //
+    // if file.extension() == Some("ron") {
+    //     ron::from_str()
+    //
+    //
+    // }
+    //
+    //
+    // let data: TopLevel = argh::from_env();
+    // dbg!(data);
+    // return Ok(());
+
+    let data = std::fs::read(r"C:\Users\Host\Downloads\zplayer")?;
+
+    let data_in = read_file(&data)?;
+    let mut file = deserialize(&data_in)?;
+    //modify(&mut file);
+    save_file(&file)?;
+
     Ok(())
 }
 
