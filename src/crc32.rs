@@ -60,6 +60,7 @@ fn main() {
     assert!(CRC_TABLE == make_game_crc_table());
 }
 */
+#[allow(unused_parens)]
 const fn make_game_crc_table() -> [u32; 256] {
     let mut i = 0usize;
     let mut out = [0u32; 256];

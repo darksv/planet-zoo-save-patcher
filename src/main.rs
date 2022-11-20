@@ -1,13 +1,15 @@
-mod crc32;
-
 use inflate::inflate_bytes;
+
 use crate::crc32::game_crc;
+
+mod crc32;
 
 struct Reader<'d> {
     data: &'d [u8],
     offset: usize,
 }
 
+#[allow(unused)]
 impl<'d> Reader<'d> {
     fn new(data: &'d [u8]) -> Self {
         Self {
@@ -76,8 +78,124 @@ enum Data<'d> {
     String(&'d str),
 }
 
-struct File {}
+impl<'d> Data<'d> {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Data::String(x) => Some(x),
+            _ => None,
+        }
+    }
 
+    fn as_items_mut(&mut self) -> Option<&mut [(Data<'d>, Data<'d>)]> {
+        match self {
+            Data::Table(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    fn get<'item>(&'item mut self, name: &str) -> Option<&'item mut Data<'d>>
+        where 'd: 'item
+    {
+        match self {
+            Data::Table(items) => {
+                for (key, value) in items {
+                    if key.as_str() == Some(name) {
+                        return Some(value);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn set_field<'i>(&mut self, name: &'i str, value: Data<'i>) where 'i: 'd {
+        match self {
+            Data::Table(values) => {
+                if let Some((k, v)) = values.iter_mut().find(|(k, v)| k.as_str() == Some(name)) {
+                    *v = value;
+                } else {
+                    values.push((Data::String(name), value));
+                }
+            }
+            _ => unimplemented!(),
+        }
+    }
+}
+
+
+#[derive(Debug)]
+struct File<'d> {
+    data: Data<'d>,
+}
+
+const MAGIC: [u8; 4] = [0xFF, 0x00, 0xFE, 0x01];
+
+fn deserialize(data: &[u8]) -> anyhow::Result<File> {
+    let mut reader = Reader::new(&data);
+    let &MAGIC = reader.read_n::<4>()? else {
+        anyhow::bail!("Invalid magic value");
+    };
+
+    let crc = reader.read_u32_be()?;
+    let num = reader.read_u32_be()?;
+    let len = reader.read_u32_be()?;
+
+    if crc != game_crc(reader.peek_slice(len as usize)?) {
+        anyhow::bail!("Invalid crc");
+    }
+
+    if num != 1 {
+        anyhow::bail!("Invalid number of files");
+    }
+
+    let n = reader.read_u32_be()?;
+    let mut items = Vec::new();
+    for _ in 0..n {
+        let d = read_data(&mut reader)?;
+        let y = read_data(&mut reader)?;
+        items.push((d, y));
+    }
+
+    Ok(File {
+        data: Data::Table(items),
+    })
+}
+
+fn serialize(file: &File, out: &mut Vec<u8>) {
+    out.extend(MAGIC);
+    out.extend([0; 12]);
+    let before = out.len();
+    serialize_data(&file.data, out, true);
+    let data_len = out.len() - before;
+    let crc = game_crc(&out[before..]) as u32;
+    out[4..][..4].copy_from_slice(&u32::to_be_bytes(crc));
+    out[8..][..4].copy_from_slice(&u32::to_be_bytes(1));
+    out[12..][..4].copy_from_slice(&u32::to_be_bytes(data_len as u32));
+}
+
+fn modify(file: &mut File) {
+    let progress = file.data
+        .get("Data").unwrap()
+        .get("Career").unwrap()
+        .get("Progress").unwrap();
+
+    for (k, v) in progress.as_items_mut().unwrap() {
+        match k.as_str().unwrap() {
+            "Challenge_06" |
+            "Challenge_07" |
+            "Challenge_08" |
+            "Challenge_09" => {
+                for (k, v) in v.as_items_mut().unwrap() {
+                    println!("BEFORE {:?}", v);
+                    v.set_field("bComplete", Data::Boolean(true));
+                    println!("AFTER {:?}", v);
+                }
+            }
+            _ => (),
+        }
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     let data = std::fs::read(r"C:\Users\Host\Downloads\zplayer")?;
@@ -106,51 +224,31 @@ fn main() -> anyhow::Result<()> {
     let data_in = inflate_bytes(data).map_err(anyhow::Error::msg)?;
     assert_eq!(data_in.len(), uncompressed as _);
 
-    let mut reader = Reader::new(&data_in);
-    let marker = reader.read_n::<4>()?;
-    let crc = reader.read_u32_be()?;
-    let num = reader.read_u32_be()?;
-    let len = reader.read_u32_be()?;
+    let mut file = deserialize(&data_in)?;
+    modify(&mut file);
+    let mut content = Vec::new();
+    serialize(&file, &mut content);
+    std::fs::write("content", &content)?;
 
-    assert_eq!(crc, game_crc(reader.peek_slice(len as usize)?));
+    // assert_eq!(&content, &data_in);
 
-    let n = reader.read_u32_be()?;
-    assert_eq!(n, 4);
 
-    let mut items = Vec::new();
-    for _ in 0..n {
-        let d = read_data(&mut reader)?;
-        let y = read_data(&mut reader)?;
-        items.push((d, y));
-    }
-    let dat = Data::Table(items);
-
-    let mut x = Vec::new();
-    x.extend(marker);
-    x.extend([0; 12]);
-    let before = x.len();
-    serialize(&dat, &mut x, true);
-    let data_len = x.len() - before;
-    x[4..][..4].copy_from_slice(&u32::to_be_bytes(crc));
-    x[8..][..4].copy_from_slice(&u32::to_be_bytes(num));
-    x[12..][..4].copy_from_slice(&u32::to_be_bytes(data_len as u32));
-
-    let xd = deflate::deflate_bytes(&x);
-    dbg!(xd.len());
+    let packed = deflate::deflate_bytes(&content);
+    dbg!(packed.len());
 
     let mut out = Vec::new();
     out.extend_from_slice(HEAD);
-    out.extend_from_slice(&xd);
+    out.extend_from_slice(&packed);
     out.extend_from_slice(TAIL);
-    out[0x0E..][..4].copy_from_slice(&u32::to_le_bytes(crc32fast::hash(&x)));
-    out[0x12..][..4].copy_from_slice(&u32::to_le_bytes(xd.len() as _));
-    out[0x16..][..4].copy_from_slice(&u32::to_le_bytes(x.len() as _));
+    out[0x0E..][..4].copy_from_slice(&u32::to_le_bytes(crc32fast::hash(&content)));
+    out[0x12..][..4].copy_from_slice(&u32::to_le_bytes(packed.len() as _));
+    out[0x16..][..4].copy_from_slice(&u32::to_le_bytes(content.len() as _));
 
-    std::fs::write("xddd", out)?;
+    std::fs::write("patched", out)?;
     Ok(())
 }
 
-fn serialize(data: &Data, out: &mut Vec<u8>, is_first: bool) {
+fn serialize_data(data: &Data, out: &mut Vec<u8>, is_first: bool) {
     match data {
         Data::Table(items) => {
             if !is_first {
@@ -158,8 +256,8 @@ fn serialize(data: &Data, out: &mut Vec<u8>, is_first: bool) {
             }
             out.extend((items.len() as u32).to_be_bytes());
             for it in items {
-                serialize(&it.0, out, false);
-                serialize(&it.1, out, false);
+                serialize_data(&it.0, out, false);
+                serialize_data(&it.1, out, false);
             }
         }
         Data::Uint64(val) => {
